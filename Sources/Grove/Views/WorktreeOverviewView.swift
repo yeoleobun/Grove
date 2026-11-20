@@ -1,27 +1,151 @@
+import AppKit
 import GroveCore
 import SwiftUI
 
-// MARK: - Shared Deterministic Tag Pill & Dismiss Button (Used by Both Worktrees & Branches)
+// MARK: - GitHub Primer Design System Palette (Official Light & Dark Tokens)
 
+struct PrimerTone {
+    let fg: Color
+    let bg: Color
+    let border: Color
+}
+
+enum GrovePalette {
+    private static func dynamic(light: (CGFloat, CGFloat, CGFloat, CGFloat), dark: (CGFloat, CGFloat, CGFloat, CGFloat)) -> Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            let c = isDark ? dark : light
+            return NSColor(srgbRed: c.0, green: c.1, blue: c.2, alpha: c.3)
+        })
+    }
+
+    // Core semantic foreground colors (used by icons, indicators, and buttons)
+    /// GitHub Done Purple (`#8250DF` / `#A371F7`) — Merged
+    static let merged = dynamic(light: (0.510, 0.314, 0.875, 1.0), dark: (0.639, 0.443, 0.969, 1.0))
+    /// GitHub Success Green (`#1A7F37` / `#3FB950`) — Clean / Safe / All Clear
+    static let teal = dynamic(light: (0.102, 0.498, 0.216, 1.0), dark: (0.247, 0.725, 0.314, 1.0))
+    /// GitHub Accent Blue (`#0969DA` / `#58A6FF`) — Unpushed / Branch Ref / Push
+    static let cobalt = dynamic(light: (0.035, 0.412, 0.855, 1.0), dark: (0.345, 0.651, 1.000, 1.0))
+    /// GitHub Attention Amber (`#9A6700` / `#D29922`) — Uncommitted / Commit
+    static let attention = dynamic(light: (0.604, 0.404, 0.000, 1.0), dark: (0.824, 0.600, 0.133, 1.0))
+    /// GitHub Danger Red (`#CF222E` / `#F85149`) — Conflict / Orphaned / Destructive hover
+    static let rose = dynamic(light: (0.812, 0.133, 0.180, 1.0), dark: (0.973, 0.318, 0.286, 1.0))
+    /// GitHub Muted Neutral (`#59636E` / `#8B949E`) — Passive metadata & secondary icons
+    static let slate = dynamic(light: (0.349, 0.388, 0.431, 1.0), dark: (0.545, 0.580, 0.620, 1.0))
+
+    // GitHub Primer Surfaces
+    static let rowHover = dynamic(light: (0.965, 0.973, 0.980, 1.0), dark: (0.086, 0.106, 0.133, 1.0))
+    static let controlHover = dynamic(light: (0.918, 0.933, 0.949, 1.0), dark: (0.188, 0.212, 0.239, 1.0))
+    static let divider = dynamic(light: (0.820, 0.851, 0.878, 1.0), dark: (0.188, 0.212, 0.239, 1.0))
+
+    // GitHub Primer Label Tones (Official Primer `Label` fg + bg + 1pt border)
+    static let doneTone = PrimerTone(
+        fg: merged,
+        bg: dynamic(light: (0.984, 0.937, 1.000, 1.0), dark: (0.537, 0.341, 0.898, 0.15)),
+        border: dynamic(light: (0.510, 0.314, 0.875, 0.35), dark: (0.639, 0.443, 0.969, 0.40))
+    )
+
+    static let successTone = PrimerTone(
+        fg: teal,
+        bg: dynamic(light: (0.855, 0.984, 0.882, 1.0), dark: (0.137, 0.525, 0.212, 0.15)),
+        border: dynamic(light: (0.102, 0.498, 0.216, 0.35), dark: (0.247, 0.725, 0.314, 0.40))
+    )
+
+    static let attentionTone = PrimerTone(
+        fg: attention,
+        bg: dynamic(light: (1.000, 0.973, 0.773, 1.0), dark: (0.733, 0.502, 0.035, 0.15)),
+        border: dynamic(light: (0.831, 0.655, 0.173, 0.45), dark: (0.824, 0.600, 0.133, 0.40))
+    )
+
+    static let accentTone = PrimerTone(
+        fg: cobalt,
+        bg: dynamic(light: (0.867, 0.957, 1.000, 1.0), dark: (0.220, 0.545, 0.992, 0.15)),
+        border: dynamic(light: (0.035, 0.412, 0.855, 0.35), dark: (0.345, 0.651, 1.000, 0.40))
+    )
+
+    static let dangerTone = PrimerTone(
+        fg: rose,
+        bg: dynamic(light: (1.000, 0.922, 0.914, 1.0), dark: (0.973, 0.318, 0.286, 0.15)),
+        border: dynamic(light: (0.812, 0.133, 0.180, 0.35), dark: (0.973, 0.318, 0.286, 0.40))
+    )
+
+    static let neutralTone = PrimerTone(
+        fg: slate,
+        bg: dynamic(light: (0.937, 0.949, 0.961, 1.0), dark: (0.431, 0.463, 0.506, 0.18)),
+        border: dynamic(light: (0.820, 0.851, 0.878, 1.0), dark: (0.431, 0.463, 0.506, 0.40))
+    )
+}
+
+// MARK: - GitHub Primer Labels & Branch Tokens
+
+/// Official GitHub Primer Solid PR State Pill — solid semantic fill + crisp white Octicon + white semibold text.
 struct DeterministicTagPill: View {
     let label: String
-    var systemImage: String? = nil
-    let color: Color
+    let icon: OcticonKind
+    let solidColor: Color
 
     var body: some View {
-        HStack(spacing: 2.5) {
-            if let systemImage {
-                Image(systemName: systemImage)
-                    .font(.system(size: 8.5, weight: .bold))
-            }
+        HStack(spacing: 4.5) {
+            OcticonGlyph(kind: icon, size: 11.5)
             Text(label)
-                .font(.system(size: 10.5, weight: .semibold))
+                .font(.system(size: 11, weight: .semibold))
                 .lineLimit(1)
         }
-        .foregroundStyle(color)
-        .padding(.horizontal, 6)
-        .padding(.vertical, 1.5)
-        .background(color.opacity(0.11), in: RoundedRectangle(cornerRadius: 4.5, style: .continuous))
+        .foregroundStyle(Color.white)
+        .padding(.horizontal, 8.5)
+        .frame(height: 20)
+        .background(solidColor, in: Capsule(style: .continuous))
+    }
+}
+
+/// Official GitHub Branch Ref token — soft accent-blue rounded rect (`r = 6`, monospace `#0969DA` on `#DDF4FF`).
+struct GroveBranchPill: View {
+    let name: String
+
+    var body: some View {
+        HStack(spacing: 4) {
+            OcticonGlyph(kind: .gitBranch, size: 10.5)
+            Text(name)
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .lineLimit(1)
+        }
+        .foregroundStyle(GrovePalette.cobalt)
+        .padding(.horizontal, 7)
+        .frame(height: 20)
+        .background(GrovePalette.accentTone.bg, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+    }
+}
+
+// MARK: - GitHub Primer Invisible Icon Buttons (`26×26`, `r = 6`)
+
+struct GroveIconButton: View {
+    let systemImage: String
+    var tint: Color? = nil
+    let tooltip: String
+    let action: () -> Void
+    @LocalState private var isHovering: Bool = false
+
+    var body: some View {
+        let fg: Color = if let tint {
+            tint
+        } else {
+            isHovering ? .primary : GrovePalette.slate
+        }
+
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 12, weight: .regular))
+                .foregroundStyle(fg)
+                .frame(width: 26, height: 26)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(isHovering ? GrovePalette.controlHover : Color.clear)
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+        .help(tooltip)
     }
 }
 
@@ -30,47 +154,31 @@ struct RowDismissButton: View {
     let action: () -> Void
     @LocalState private var isHovering: Bool = false
 
-    static let groveEmerald = Color(red: 0.06, green: 0.66, blue: 0.45)
+    static let groveEmerald = GrovePalette.teal
 
     var body: some View {
-        let color: Color = isSafe ? Self.groveEmerald : .orange
-        let shape = RoundedRectangle(cornerRadius: 6.5, style: .continuous)
+        let fg: Color = if isSafe {
+            GrovePalette.merged
+        } else {
+            isHovering ? GrovePalette.rose : GrovePalette.slate
+        }
+        let hoverFill: Color = isSafe
+            ? GrovePalette.doneTone.bg
+            : GrovePalette.dangerTone.bg
 
         Button(action: action) {
             Image(systemName: "xmark")
-                .font(.system(size: 10.5, weight: .semibold))
-                .foregroundStyle(isHovering ? color : color.opacity(0.82))
-                .frame(width: 26, height: 26)
-                .background(shape.fill(color.opacity(isHovering ? 0.16 : 0.08)))
-                .overlay(shape.strokeBorder(isHovering ? color.opacity(0.45) : Color.clear, lineWidth: 1))
-                .contentShape(shape)
-        }
-        .buttonStyle(.plain)
-        .onHover { isHovering = $0 }
-    }
-}
-
-private struct RowQuickIconButton: View {
-    let systemImage: String
-    var tint: Color = .secondary
-    let tooltip: String
-    let action: () -> Void
-    @LocalState private var isHovering: Bool = false
-
-    var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 6, style: .continuous)
-
-        Button(action: action) {
-            Image(systemName: systemImage)
                 .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(isHovering ? (tint == .secondary ? Color.primary : tint) : tint)
-                .frame(width: 24, height: 24)
-                .background(shape.fill(isHovering ? Color.primary.opacity(0.08) : Color.primary.opacity(0.035)))
-                .contentShape(shape)
+                .foregroundStyle(fg)
+                .frame(width: 26, height: 26)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(isHovering ? hoverFill : Color.clear)
+                )
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }
-        .help(tooltip)
     }
 }
 
@@ -178,34 +286,43 @@ struct ProjectWorktreeRowView: View {
     }
 
     private var changedFilesForThisWorktree: [WorkingTreeFileChange]? {
-        guard let snapshot, snapshot.selectedWorktreeID == worktree.id else { return nil }
-        return snapshot.changedFiles
+        viewModel.changedFilesByWorktreeID[worktree.id]
     }
 
     private var leadingIconName: String {
         switch worktree.kind {
         case .main:
-            return "house"
+            return "tree"
         case .prunable:
             return "exclamationmark.triangle"
         case .linked:
-            return "folder"
+            return "leaf"
         }
     }
 
     private var leadingIconColor: Color {
         if worktree.kind == .prunable {
-            return .orange
+            return GrovePalette.slate
         }
         if worktree.isSafeToRemoveLinkedWorktree {
-            return Self.groveEmerald
+            return GrovePalette.teal
         }
         return .secondary
     }
 
+    /// Smart display path: relative path if nested inside the main repo (e.g. `.claude/worktrees/...`),
+    /// otherwise tilde-shortened path (e.g. `~/.codex/worktrees/...`).
+    private var smartWorktreePath: String {
+        let primary = project.primaryPath.hasSuffix("/") ? project.primaryPath : (project.primaryPath + "/")
+        if worktree.path.hasPrefix(primary) {
+            return String(worktree.path.dropFirst(primary.count))
+        }
+        return worktree.displayPath
+    }
+
     private var comparisonSummaryText: String? {
         if worktree.kind == .prunable {
-            return "Directory missing at \(worktree.displayPath)"
+            return "Directory missing"
         }
         if let comp = worktree.gitComparison {
             if worktree.kind == .main {
@@ -218,7 +335,7 @@ struct ProjectWorktreeRowView: View {
                     if comp.behindUpstreamCount > 0 { parts.append("↓\(comp.behindUpstreamCount)") }
                     return "\(parts.joined(separator: " ")) vs \(upstream)"
                 }
-                return worktree.displayPath
+                return nil
             }
 
             if let base = comp.baseRef {
@@ -234,7 +351,7 @@ struct ProjectWorktreeRowView: View {
                 return "\(parts.joined(separator: " · ")) \(base)"
             }
         }
-        return worktree.displayPath
+        return nil
     }
 
     private var commitSubjectText: String {
@@ -263,10 +380,19 @@ struct ProjectWorktreeRowView: View {
 
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 10) {
-                Image(systemName: leadingIconName)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(leadingIconColor)
-                    .frame(width: 16)
+                Group {
+                    if worktree.kind == .prunable {
+                        OcticonGlyph(kind: .alert, size: 13.5)
+                            .foregroundStyle(GrovePalette.attention)
+                    } else if worktree.kind == .main {
+                        OcticonGlyph(kind: .repo, size: 14)
+                            .foregroundStyle(GrovePalette.slate)
+                    } else {
+                        OcticonGlyph(kind: .fileDirectory, size: 14)
+                            .foregroundStyle(worktree.isSafeToRemoveLinkedWorktree ? GrovePalette.merged : GrovePalette.slate)
+                    }
+                }
+                .frame(width: 16)
 
                 VStack(alignment: .leading, spacing: 2.5) {
                     // Line 1: Worktree name + branch ref + strictly deterministic Git tags
@@ -277,37 +403,34 @@ struct ProjectWorktreeRowView: View {
                             .lineLimit(1)
 
                         if let branch = worktree.branchName, !branch.isEmpty {
-                            HStack(spacing: 3) {
-                                Image(systemName: "arrow.triangle.branch")
-                                    .font(.system(size: 8.5, weight: .semibold))
-                                Text(branch)
-                                    .font(.system(size: 10.5, weight: .medium, design: .monospaced))
-                                    .lineLimit(1)
-                            }
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 1.5)
-                            .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 4.5, style: .continuous))
+                            GroveBranchPill(name: branch)
                         }
 
                         deterministicTagsRow
                     }
 
-                    // Line 2: Deterministic comparison vs base + latest commit subject
+                    // Line 2: Always show worktree directory path + comparison vs base + latest commit subject
                     HStack(spacing: 6) {
+                        Text(smartWorktreePath)
+                            .font(.system(size: 11.5, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+
                         if let comp = comparisonSummaryText, !comp.isEmpty {
+                            Text("·")
+                                .foregroundStyle(.quaternary)
+
                             Text(comp)
                                 .font(.system(size: 11.5, weight: .medium))
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
-
-                            if !commitSubjectText.isEmpty {
-                                Text("·")
-                                    .foregroundStyle(.quaternary)
-                            }
                         }
 
                         if !commitSubjectText.isEmpty {
+                            Text("·")
+                                .foregroundStyle(.quaternary)
+
                             Text(commitSubjectText)
                                 .font(.system(size: 11.5))
                                 .foregroundStyle(.tertiary)
@@ -334,18 +457,15 @@ struct ProjectWorktreeRowView: View {
                         worktreeFolderActions
                     }
 
-                    if !shortHashText.isEmpty {
-                        Text(shortHashText)
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(.tertiary)
-                    }
+                    Text(shortHashText)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                        .frame(width: 60, alignment: .trailing)
 
-                    if !ageText.isEmpty {
-                        Text(ageText)
-                            .font(.system(size: 11.5).monospacedDigit())
-                            .foregroundStyle(.secondary)
-                            .frame(minWidth: 28, alignment: .trailing)
-                    }
+                    Text(ageText)
+                        .font(.system(size: 11.5).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(width: 32, alignment: .trailing)
 
                     trailingDismissSlot
                 }
@@ -355,8 +475,8 @@ struct ProjectWorktreeRowView: View {
             .background(
                 shape.fill(
                     isHighlighted
-                        ? Color.accentColor.opacity(0.11)
-                        : (isHovering ? Color.primary.opacity(0.04) : Color.clear)
+                        ? GrovePalette.accentTone.bg
+                        : (isHovering ? GrovePalette.rowHover : Color.clear)
                 )
             )
             .overlay(
@@ -390,41 +510,41 @@ struct ProjectWorktreeRowView: View {
     @ViewBuilder
     private var deterministicTagsRow: some View {
         if worktree.kind == .main {
-            DeterministicTagPill(label: "Primary", color: .secondary)
+            DeterministicTagPill(label: "Primary", icon: .gitBranch, solidColor: GrovePalette.slate)
         }
 
         if worktree.kind == .prunable {
-            DeterministicTagPill(label: "Missing folder", color: .orange)
+            DeterministicTagPill(label: "Missing Folder", icon: .alert, solidColor: GrovePalette.attention)
         }
 
         if worktree.isDetached {
-            DeterministicTagPill(label: "Detached", color: .orange)
+            DeterministicTagPill(label: "Detached", icon: .gitCommit, solidColor: GrovePalette.slate)
         }
 
         if isOrphanedDetached {
-            DeterministicTagPill(label: "Orphaned", color: .red)
+            DeterministicTagPill(label: "Orphaned", icon: .alert, solidColor: GrovePalette.rose)
         }
 
         if isAncestorMerged {
-            DeterministicTagPill(label: "Merged", color: Self.groveEmerald)
+            DeterministicTagPill(label: "Merged", icon: .gitMerge, solidColor: GrovePalette.merged)
         } else if isSquashMerged {
-            DeterministicTagPill(label: "Squash-merged", color: .orange)
+            DeterministicTagPill(label: "Squash-Merged", icon: .gitMerge, solidColor: GrovePalette.merged)
         }
 
         if worktree.kind != .prunable {
             if worktree.workingTreeStatus.conflictCount > 0 {
-                DeterministicTagPill(label: "Conflict", color: .red)
+                DeterministicTagPill(label: "Conflict", icon: .alert, solidColor: GrovePalette.rose)
             } else if worktree.dirtyFilesCount > 0 {
-                DeterministicTagPill(label: "\(worktree.dirtyFilesCount) uncommitted", color: .orange)
+                DeterministicTagPill(label: "\(worktree.dirtyFilesCount) Uncommitted", icon: .diffModified, solidColor: GrovePalette.attention)
             } else if case let .needsPush(count, _) = worktree.actionState,
                       count > 0,
                       !worktree.isDetached {
-                DeterministicTagPill(label: "↑\(count) unpushed", color: .blue)
+                DeterministicTagPill(label: "\(count) Unpushed", icon: .upload, solidColor: GrovePalette.cobalt)
             }
         }
 
         if isIdleCommit {
-            DeterministicTagPill(label: "idle \(commitIdleDays)d", systemImage: "zzz", color: .orange)
+            DeterministicTagPill(label: "Idle \(commitIdleDays)d", icon: .clock, solidColor: GrovePalette.slate)
         }
     }
 
@@ -432,9 +552,9 @@ struct ProjectWorktreeRowView: View {
     private var worktreeFolderActions: some View {
         HStack(spacing: 4) {
             if worktree.hasUncommittedChanges && worktree.workingTreeStatus.conflictCount == 0 {
-                RowQuickIconButton(
+                GroveIconButton(
                     systemImage: "checkmark.circle",
-                    tint: .orange,
+                    tint: GrovePalette.attention,
                     tooltip: "Commit \(worktree.dirtyFilesCount) changed file\(worktree.dirtyFilesCount == 1 ? "" : "s")…"
                 ) {
                     viewModel.pendingCommitCheckout = PendingCommitCheckout(
@@ -446,23 +566,23 @@ struct ProjectWorktreeRowView: View {
                       count > 0,
                       !worktree.isDetached,
                       worktree.gitComparison?.hasRemote == true {
-                RowQuickIconButton(
+                GroveIconButton(
                     systemImage: "arrow.up.circle",
-                    tint: .blue,
+                    tint: GrovePalette.cobalt,
                     tooltip: "Push \(count) commit\(count == 1 ? "" : "s") to remote"
                 ) {
                     viewModel.pushCheckout(worktree, in: project)
                 }
             }
 
-            RowQuickIconButton(
+            GroveIconButton(
                 systemImage: "chevron.left.forwardslash.chevron.right",
                 tooltip: "Open '\(worktree.name)' in \(viewModel.configuration.resolvedEditorLabel)"
             ) {
                 viewModel.openInEditor(path: worktree.path)
             }
 
-            RowQuickIconButton(
+            GroveIconButton(
                 systemImage: "terminal",
                 tooltip: "Open '\(worktree.name)' in \(viewModel.configuration.resolvedTerminalLabel)"
             ) {
@@ -479,7 +599,7 @@ struct ProjectWorktreeRowView: View {
             ProgressView()
                 .controlSize(.mini)
                 .frame(width: 26, height: 26)
-        } else if worktree.isSafeToRemoveLinkedWorktree || isIdleCommit || worktree.kind == .prunable || isHovering || isHighlighted {
+        } else {
             RowDismissButton(isSafe: worktree.isSafeToRemoveLinkedWorktree) {
                 if worktree.kind == .prunable {
                     viewModel.pruneGhostWorktrees(in: project)
@@ -497,8 +617,6 @@ struct ProjectWorktreeRowView: View {
                         ? "Remove merged worktree '\(worktree.name)'…"
                         : "Remove worktree '\(worktree.name)' (prompts with safety check)…")
             )
-        } else {
-            Color.clear.frame(width: 26, height: 26)
         }
     }
 
@@ -532,9 +650,7 @@ struct ProjectWorktreeRowView: View {
             }
             .padding(.vertical, 4)
             .onAppear {
-                if viewModel.selectedWorktreeID != worktree.id {
-                    viewModel.selectCheckout(projectID: project.id, worktreeID: worktree.id)
-                }
+                viewModel.loadChangedFilesIfNeeded(for: worktree)
             }
         }
     }
@@ -616,10 +732,10 @@ private struct DetailWorkingTreeFileRow: View {
 
     private var statusColor: Color {
         switch change.status {
-        case .modified: return .orange
-        case .added: return RowDismissButton.groveEmerald
-        case .deleted, .conflicted: return .red
-        case .renamed: return .blue
+        case .modified: return GrovePalette.cobalt
+        case .added: return GrovePalette.teal
+        case .deleted, .conflicted: return GrovePalette.rose
+        case .renamed: return GrovePalette.slate
         case .untracked: return .secondary
         }
     }

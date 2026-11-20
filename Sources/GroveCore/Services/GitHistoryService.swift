@@ -462,7 +462,8 @@ public enum GitHistoryService {
     public static func loadSnapshot(
         for project: ProjectGroup,
         selectedWorktree: WorktreeItem?,
-        maxCommits: Int = 180
+        maxCommits: Int = 180,
+        includeWorkingTreeChanges: Bool = true
     ) -> ProjectHistorySnapshot {
         let targetWT = selectedWorktree ?? project.mainWorktree ?? project.worktrees.first
         let repoAnchorPath = FileManager.default.fileExists(atPath: project.primaryPath)
@@ -541,7 +542,7 @@ public enum GitHistoryService {
 
         // 6. Fetch structured changed files + diff line stats for the selected checkout
         let changedFiles: [WorkingTreeFileChange]
-        if let wt = targetWT, wt.kind != .prunable, FileManager.default.fileExists(atPath: wt.path) {
+        if includeWorkingTreeChanges, let wt = targetWT, wt.kind != .prunable, FileManager.default.fileExists(atPath: wt.path) {
             changedFiles = fetchWorkingTreeChanges(at: wt.path)
         } else {
             changedFiles = []
@@ -1421,7 +1422,7 @@ public enum GitHistoryService {
 
     // MARK: - Structured Working-Tree File Changes + Diff Stats
 
-    private static func fetchWorkingTreeChanges(at worktreePath: String) -> [WorkingTreeFileChange] {
+    public static func fetchWorkingTreeChanges(at worktreePath: String) -> [WorkingTreeFileChange] {
         guard let statusRes = try? ShellRunner.run(
             executable: "git",
             arguments: ["--no-optional-locks", "-C", worktreePath, "status", "--porcelain=v1", "-uall"]

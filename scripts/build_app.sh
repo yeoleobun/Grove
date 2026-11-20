@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="Grove"
 BINARY_TARGET="Grove"
-VERSION="${VERSION:-0.1.0}"
+VERSION="${VERSION:-0.2.0}"
 DIST_DIR="${ROOT_DIR}/dist"
 APP_BUNDLE="${DIST_DIR}/${APP_NAME}.app"
 ZIP_PATH="${DIST_DIR}/${APP_NAME}-macos-arm64.zip"
@@ -35,9 +35,10 @@ trap 'rm -rf "${TMP_ICON_DIR}"' EXIT
 ICONSET_DIR="${TMP_ICON_DIR}/AppIcon.iconset"
 swift "${ROOT_DIR}/scripts/generate_icon.swift" "${ICONSET_DIR}"
 
-ICON_HASH="$(cat "${ROOT_DIR}/scripts/generate_icon.swift" "${ROOT_DIR}/Resources/AppIconArtwork.jpg" | shasum -a 256 | cut -c1-8)"
+ICON_HASH="$(cat "${ROOT_DIR}/scripts/generate_icon.swift" "${ROOT_DIR}/Resources/AppIconArtwork.png" | shasum -a 256 | cut -c1-8)"
 ICON_NAME="AppIcon-${ICON_HASH}"
 iconutil -c icns "${ICONSET_DIR}" -o "${RESOURCES_DIR}/${ICON_NAME}.icns"
+cp "${ROOT_DIR}/Resources/AppIconArtwork.png" "${RESOURCES_DIR}/AppIconArtwork.png"
 
 echo "==> Writing Info.plist..."
 cat > "${CONTENTS_DIR}/Info.plist" << EOF

@@ -5,57 +5,52 @@ import GroveCore
 import SwiftUI
 import UniformTypeIdentifiers
 
-enum ProjectFilter: String, CaseIterable, Identifiable {
+enum DashboardFilter: String, CaseIterable, Identifiable {
     case all
-    case hasWorktrees
-    case needsCommitOrPush
-    case readyToRemove
+    case readyToClean
+    case worktreesOnly
+    case branchesOnly
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
         case .all: return "All"
-        case .hasWorktrees: return "Has Worktrees"
-        case .needsCommitOrPush: return "Needs Commit or Push"
-        case .readyToRemove: return "Ready to Clean"
+        case .readyToClean: return "Ready to Clean"
+        case .worktreesOnly: return "Worktrees"
+        case .branchesOnly: return "Idle Branches"
         }
     }
 
     var systemImage: String {
         switch self {
         case .all: return "tray.full"
-        case .hasWorktrees: return "arrow.triangle.branch"
-        case .needsCommitOrPush: return "circle.dotted.circle"
-        case .readyToRemove: return "checkmark.circle"
+        case .readyToClean: return "checkmark.circle"
+        case .worktreesOnly: return "folder.on.folder"
+        case .branchesOnly: return "arrow.triangle.branch"
         }
     }
 }
 
-enum ProjectSortOrder: String, CaseIterable, Identifiable {
-    case actionNeeded
-    case lastUpdated
-    case worktreeCount
-    case name
+struct DashboardProjectEntry: Identifiable {
+    let project: ProjectGroup
+    let snapshot: ProjectHistorySnapshot?
+    let worktrees: [WorktreeItem]
+    let idleBranches: [LocalBranchInfo]
 
-    var id: String { rawValue }
+    var id: String { project.id }
+    var totalItemCount: Int { worktrees.count + idleBranches.count }
 
-    var title: String {
-        switch self {
-        case .actionNeeded: return "Action Needed"
-        case .lastUpdated: return "Last Updated"
-        case .worktreeCount: return "Worktrees"
-        case .name: return "Name"
-        }
+    var removableBranches: [LocalBranchInfo] {
+        idleBranches.filter(\.isSafeToRemove)
     }
 
-    var systemImage: String {
-        switch self {
-        case .actionNeeded: return "bolt.circle"
-        case .lastUpdated: return "clock"
-        case .worktreeCount: return "point.3.connected.trianglepath.dotted"
-        case .name: return "textformat.abc"
-        }
+    var prunableWorktrees: [WorktreeItem] {
+        worktrees.filter { $0.kind == .prunable }
+    }
+
+    var hasRemote: Bool {
+        snapshot?.hasRemote ?? (project.mainWorktree?.gitComparison?.hasRemote == true)
     }
 }
 
@@ -86,11 +81,6 @@ struct PendingBatchBranchCleanup: Identifiable {
     var id: String { "\(project.id)::batch-branches" }
 }
 
-struct CheckoutSelection: Hashable {
-    let projectID: String
-    let worktreeID: String?
-}
-
 private final class ScanSequenceBox: @unchecked Sendable {
     private let lock = NSLock()
     private var counter: Int = 0
@@ -108,46 +98,20 @@ private final class ScanSequenceBox: @unchecked Sendable {
 final class AppViewModel {
     var configuration: ScanConfiguration
     var projects: [ProjectGroup] = []
+    var snapshotsByProjectID: [String: ProjectHistorySnapshot] = [:]
+    var changedFilesByWorktreeID: [String: [WorkingTreeFileChange]] = [:]
+    var loadingChangedFilesWorktreeIDs: Set<String> = []
     var scanSummary = ScanSummary()
 
-    // Project List state
-    var selectedFolderID: UUID? {
-        didSet {
-            guard selectedFolderID != oldValue else { return }
-            ensureValidSelection(forceRefresh: false)
-        }
-    }
-    var activeFilter: ProjectFilter = .all {
-        didSet {
-            guard activeFilter != oldValue else { return }
-            ensureValidSelection(forceRefresh: false)
-        }
-    }
-    var searchText: String = "" {
-        didSet {
-            guard searchText != oldValue else { return }
-            ensureValidSelection(forceRefresh: false)
-        }
-    }
-    var sortOrder: ProjectSortOrder = .actionNeeded {
-        didSet {
-            guard sortOrder != oldValue else { return }
-            withAnimation(.snappy(duration: 0.28, extraBounce: 0)) {
-                projects = sortProjects(projects, by: sortOrder)
-            }
-        }
-    }
-    var expandedProjectIDs: Set<String> = []
-
-    // Unified Single-Page Right Detail State (Worktrees + Local Branches)
-    var isInspectorVisible: Bool = true
-    var selectedProjectID: String?
-    var selectedWorktreeID: String?
-    var historySnapshot: ProjectHistorySnapshot?
-    var isLoadingHistory: Bool = false
+    // Dashboard Filter & Search State
+    var selectedFolderID: UUID?
+    var activeFilter: DashboardFilter = .all
+    var searchText: String = ""
 
     var isScanning: Bool = false
-    /// Scoped per-item busy tracking so acting on one project/worktree NEVER grays out other rows!
+    var isLoadingSnapshots: Bool = false
+
+    /// Scoped per-item busy tracking so acting on one project/worktree NEVER grays out other rows.
     var busyProjectIDs: Set<String> = []
     var busyWorktreeIDs: Set<String> = []
     var deletingWorktreeIDs: Set<String> = []
@@ -169,7 +133,6 @@ final class AppViewModel {
 
     private let store: ConfigurationStore
     private var currentScanTask: Task<Void, Never>?
-    private var currentHistoryTask: Task<Void, Never>?
     private var activeScanID = UUID()
     private var appliedPartialSeq: Int = 0
     private var lastScanFinishedAt: Date?
@@ -199,27 +162,31 @@ final class AppViewModel {
     // MARK: - Window Subtitle
 
     var windowSubtitle: String {
-        if isScanning || isPerformingAction {
+        if isScanning || isLoadingSnapshots || isPerformingAction {
             return statusMessage
         }
         guard !configuration.enabledFolderPaths.isEmpty else {
             return "No scan folders configured"
         }
-        let s = scanSummary
+        guard !projects.isEmpty else {
+            return "No Git repositories found"
+        }
+
+        let entries = allDashboardEntries
+        if entries.isEmpty {
+            return "All clear across \(projects.count) repo\(projects.count == 1 ? "" : "s")"
+        }
+
+        let totalWorktrees = entries.reduce(0) { $0 + $1.worktrees.count }
+        let totalBranches = entries.reduce(0) { $0 + $1.idleBranches.count }
         var parts = [
-            "\(s.projectCount) repo\(s.projectCount == 1 ? "" : "s")"
+            "\(entries.count) project\(entries.count == 1 ? "" : "s")"
         ]
-        if s.linkedWorktreeCount > 0 {
-            parts.append("\(s.linkedWorktreeCount) worktree\(s.linkedWorktreeCount == 1 ? "" : "s")")
+        if totalWorktrees > 0 {
+            parts.append("\(totalWorktrees) worktree\(totalWorktrees == 1 ? "" : "s")")
         }
-        if s.needsCommitCount > 0 {
-            parts.append("\(s.needsCommitCount) uncommitted")
-        }
-        if s.needsPushCount > 0 {
-            parts.append("\(s.needsPushCount) unpushed")
-        }
-        if s.removableWorktreeCount > 0 {
-            parts.append("\(s.removableWorktreeCount) ready to clean")
+        if totalBranches > 0 {
+            parts.append("\(totalBranches) idle branch\(totalBranches == 1 ? "" : "es")")
         }
         return parts.joined(separator: " · ")
     }
@@ -229,7 +196,11 @@ final class AppViewModel {
         return configuration.folders.first(where: { $0.id == id })
     }
 
-    // MARK: - Filtering & Sorting
+    var hasActiveFilter: Bool {
+        activeFilter != .all || selectedFolderID != nil || !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    // MARK: - Dashboard Grouping & Filtering (Only Projects With Worktrees or Idle Branches)
 
     private var folderScopedProjects: [ProjectGroup] {
         guard let folder = selectedFolder else { return projects }
@@ -239,96 +210,110 @@ final class AppViewModel {
         }
     }
 
-    func count(for filter: ProjectFilter) -> Int {
-        let base = folderScopedProjects
+    /// All projects in the active folder scope that have at least one linked/prunable worktree or idle branch.
+    var allDashboardEntries: [DashboardProjectEntry] {
+        folderScopedProjects.compactMap { project in
+            let snapshot = snapshotsByProjectID[project.id]
+            let worktrees = Self.sortedLinkedWorktrees(for: project, snapshot: snapshot)
+            let idleBranches = Self.sortedIdleBranches(from: snapshot)
+            guard !worktrees.isEmpty || !idleBranches.isEmpty else { return nil }
+            return DashboardProjectEntry(
+                project: project,
+                snapshot: snapshot,
+                worktrees: worktrees,
+                idleBranches: idleBranches
+            )
+        }
+    }
+
+    /// Filtered dashboard entries honoring `activeFilter` and `searchText`.
+    /// Projects with 0 matching items are omitted automatically.
+    var dashboardEntries: [DashboardProjectEntry] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+        return allDashboardEntries.compactMap { entry in
+            var worktrees = entry.worktrees
+            var branches = entry.idleBranches
+
+            switch activeFilter {
+            case .all:
+                break
+            case .readyToClean:
+                worktrees = worktrees.filter { WorktreeHygieneEvaluator.isMergedOrPrunable($0) }
+                branches = branches.filter { $0.relationship.isMergedIntoBase }
+            case .worktreesOnly:
+                branches = []
+            case .branchesOnly:
+                worktrees = []
+            }
+
+            if !query.isEmpty {
+                let projectMatches = entry.project.name.lowercased().contains(query)
+                    || entry.project.primaryPath.lowercased().contains(query)
+                if !projectMatches {
+                    worktrees = worktrees.filter { wt in
+                        wt.name.lowercased().contains(query)
+                            || wt.path.lowercased().contains(query)
+                            || (wt.branchName?.lowercased().contains(query) ?? false)
+                    }
+                    branches = branches.filter { branch in
+                        branch.name.lowercased().contains(query)
+                            || branch.subject.lowercased().contains(query)
+                    }
+                }
+            }
+
+            guard !worktrees.isEmpty || !branches.isEmpty else { return nil }
+            return DashboardProjectEntry(
+                project: entry.project,
+                snapshot: entry.snapshot,
+                worktrees: worktrees,
+                idleBranches: branches
+            )
+        }
+    }
+
+    func itemCount(for filter: DashboardFilter) -> Int {
         switch filter {
         case .all:
-            return base.count
-        case .hasWorktrees:
-            return base.filter { !$0.subWorktrees.isEmpty }.count
-        case .needsCommitOrPush:
-            return base.reduce(0) { $0 + $1.needsCommitCount + $1.needsPushCount }
-        case .readyToRemove:
-            return base.reduce(0) { $0 + $1.removableWorktreeCount }
-        }
-    }
-
-    var filteredProjects: [ProjectGroup] {
-        var result = folderScopedProjects
-
-        switch activeFilter {
-        case .all:
-            break
-        case .hasWorktrees:
-            result = result.filter { !$0.subWorktrees.isEmpty }
-        case .needsCommitOrPush:
-            result = result.filter { ($0.needsCommitCount + $0.needsPushCount) > 0 }
-        case .readyToRemove:
-            result = result.filter { $0.removableWorktreeCount > 0 }
-        }
-
-        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if !query.isEmpty {
-            result = result.filter { project in
-                if project.name.lowercased().contains(query) || project.primaryPath.lowercased().contains(query) {
-                    return true
-                }
-                return project.worktrees.contains { wt in
-                    wt.name.lowercased().contains(query)
-                        || wt.path.lowercased().contains(query)
-                        || (wt.branchName?.lowercased().contains(query) ?? false)
-                }
+            return allDashboardEntries.reduce(0) { $0 + $1.totalItemCount }
+        case .readyToClean:
+            return allDashboardEntries.reduce(0) { sum, entry in
+                let wtCount = entry.worktrees.filter { WorktreeHygieneEvaluator.isMergedOrPrunable($0) }.count
+                let brCount = entry.idleBranches.filter { $0.relationship.isMergedIntoBase }.count
+                return sum + wtCount + brCount
             }
-        }
-
-        // Preserve `projects` order during in-place item actions (e.g. deleting a worktree or committing)
-        // so the card you are interacting with never teleports to another scroll position!
-        return result
-    }
-
-    private func sortProjects(_ list: [ProjectGroup], by order: ProjectSortOrder) -> [ProjectGroup] {
-        list.sorted { lhs, rhs in
-            switch order {
-            case .actionNeeded:
-                if lhs.highestUrgencyRank != rhs.highestUrgencyRank {
-                    return lhs.highestUrgencyRank < rhs.highestUrgencyRank
-                }
-                if lhs.actionableCheckoutCount != rhs.actionableCheckoutCount {
-                    return lhs.actionableCheckoutCount > rhs.actionableCheckoutCount
-                }
-                if lhs.subWorktrees.count != rhs.subWorktrees.count {
-                    return lhs.subWorktrees.count > rhs.subWorktrees.count
-                }
-                let lDate = lhs.lastModified ?? .distantPast
-                let rDate = rhs.lastModified ?? .distantPast
-                if lDate != rDate { return lDate > rDate }
-                return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
-
-            case .lastUpdated:
-                let lDate = lhs.lastModified ?? .distantPast
-                let rDate = rhs.lastModified ?? .distantPast
-                if lDate != rDate { return lDate > rDate }
-                return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
-
-            case .worktreeCount:
-                if lhs.subWorktrees.count != rhs.subWorktrees.count {
-                    return lhs.subWorktrees.count > rhs.subWorktrees.count
-                }
-                if lhs.highestUrgencyRank != rhs.highestUrgencyRank {
-                    return lhs.highestUrgencyRank < rhs.highestUrgencyRank
-                }
-                return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
-
-            case .name:
-                return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
-            }
+        case .worktreesOnly:
+            return allDashboardEntries.reduce(0) { $0 + $1.worktrees.count }
+        case .branchesOnly:
+            return allDashboardEntries.reduce(0) { $0 + $1.idleBranches.count }
         }
     }
 
-    func projectCount(in folder: ScanFolder) -> Int {
+    /// Clean & merged (or missing/prunable) linked worktrees that are safe to remove right now.
+    var readyToCleanWorktreeCount: Int {
+        allDashboardEntries.reduce(0) { sum, entry in
+            sum + entry.worktrees.filter { $0.isSafeToRemoveLinkedWorktree || $0.kind == .prunable }.count
+        }
+    }
+
+    /// Idle local branches already merged into the base branch.
+    var readyToCleanBranchCount: Int {
+        allDashboardEntries.reduce(0) { sum, entry in
+            sum + entry.removableBranches.count
+        }
+    }
+
+    var readyToCleanTotalCount: Int {
+        readyToCleanWorktreeCount + readyToCleanBranchCount
+    }
+
+    func dashboardProjectCount(in folder: ScanFolder) -> Int {
         let rootCanonical = PathNormalizer.canonicalPath(folder.path)
         return projects.filter { group in
-            Self.projectBelongsToOneLevelFolder(group, folderCanonicalPath: rootCanonical)
+            guard Self.projectBelongsToOneLevelFolder(group, folderCanonicalPath: rootCanonical) else { return false }
+            if !group.subWorktrees.isEmpty { return true }
+            return !Self.sortedIdleBranches(from: snapshotsByProjectID[group.id]).isEmpty
         }.count
     }
 
@@ -339,28 +324,94 @@ final class AppViewModel {
         }
     }
 
-    // MARK: - Linked Worktree Disclosure State
-
-    var expandableProjects: [ProjectGroup] {
-        filteredProjects.filter { !$0.subWorktrees.isEmpty }
-    }
-
-    func toggleExpanded(_ projectID: String) {
-        if expandedProjectIDs.contains(projectID) {
-            expandedProjectIDs.remove(projectID)
-        } else {
-            expandedProjectIDs.insert(projectID)
+    static func sortedLinkedWorktrees(for project: ProjectGroup, snapshot: ProjectHistorySnapshot?) -> [WorktreeItem] {
+        project.subWorktrees.sorted { lhs, rhs in
+            let lMerged = WorktreeHygieneEvaluator.isMergedOrPrunable(lhs)
+            let rMerged = WorktreeHygieneEvaluator.isMergedOrPrunable(rhs)
+            if lMerged != rMerged {
+                return lMerged
+            }
+            let lIdle = WorktreeHygieneEvaluator.hasIdleCommit(lhs, snapshot: snapshot)
+            let rIdle = WorktreeHygieneEvaluator.hasIdleCommit(rhs, snapshot: snapshot)
+            if lIdle != rIdle {
+                return lIdle
+            }
+            let lDays = WorktreeHygieneEvaluator.commitIdleDays(for: lhs, snapshot: snapshot)
+            let rDays = WorktreeHygieneEvaluator.commitIdleDays(for: rhs, snapshot: snapshot)
+            if lIdle && rIdle && lDays != rDays {
+                return lDays > rDays
+            }
+            return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
         }
     }
 
-    func expandAll() {
-        for p in expandableProjects {
-            expandedProjectIDs.insert(p.id)
+    /// Standalone local branches that are not the base trunk and not currently checked out in any worktree.
+    static func sortedIdleBranches(from snapshot: ProjectHistorySnapshot?) -> [LocalBranchInfo] {
+        guard let snapshot else { return [] }
+        let idle = snapshot.localBranches.filter { branch in
+            branch.relationship != .baseTrunk && branch.checkedOutWorktreeID == nil
+        }
+        return idle.sorted { lhs, rhs in
+            let lRank = branchPriorityRank(lhs)
+            let rRank = branchPriorityRank(rhs)
+            if lRank != rRank {
+                return lRank < rRank
+            }
+            if lRank == 1 && lhs.idleDays != rhs.idleDays {
+                return lhs.idleDays > rhs.idleDays
+            }
+            let lDate = lhs.committedAt ?? .distantPast
+            let rDate = rhs.committedAt ?? .distantPast
+            if lDate != rDate {
+                return lDate > rDate
+            }
+            return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
         }
     }
 
-    func collapseAll() {
-        expandedProjectIDs.removeAll()
+    private static func branchPriorityRank(_ branch: LocalBranchInfo) -> Int {
+        if branch.relationship.isMergedIntoBase {
+            return 0
+        }
+        if branch.idleDays >= 14 {
+            return 1
+        }
+        return 2
+    }
+
+    private func sortProjectsForDashboard(_ list: [ProjectGroup], snapshots: [String: ProjectHistorySnapshot]) -> [ProjectGroup] {
+        list.sorted { lhs, rhs in
+            let lCount = lhs.subWorktrees.count + Self.sortedIdleBranches(from: snapshots[lhs.id]).count
+            let rCount = rhs.subWorktrees.count + Self.sortedIdleBranches(from: snapshots[rhs.id]).count
+            if lCount != rCount {
+                return lCount > rCount
+            }
+            if lhs.subWorktrees.count != rhs.subWorktrees.count {
+                return lhs.subWorktrees.count > rhs.subWorktrees.count
+            }
+            return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+        }
+    }
+
+    // MARK: - On-Demand Working-Tree Diff Loading
+
+    func loadChangedFilesIfNeeded(for worktree: WorktreeItem) {
+        guard worktree.kind != .prunable, worktree.dirtyFilesCount > 0 else { return }
+        guard changedFilesByWorktreeID[worktree.id] == nil,
+              !loadingChangedFilesWorktreeIDs.contains(worktree.id) else {
+            return
+        }
+        loadingChangedFilesWorktreeIDs.insert(worktree.id)
+        let wtID = worktree.id
+        let wtPath = worktree.path
+
+        Task {
+            let files = await Task.detached(priority: .userInitiated) {
+                GitHistoryService.fetchWorkingTreeChanges(at: wtPath)
+            }.value
+            self.loadingChangedFilesWorktreeIDs.remove(wtID)
+            self.changedFilesByWorktreeID[wtID] = files
+        }
     }
 
     // MARK: - Configuration Management
@@ -373,7 +424,7 @@ final class AppViewModel {
     func promptAddFolder() {
         let panel = NSOpenPanel()
         panel.title = "Choose Folders Containing Git Repositories"
-        panel.message = "Grove checks each selected folder 1 level deep for Git repositories and groups all linked Git worktrees."
+        panel.message = "Grove checks each selected folder 1 level deep for Git repositories and groups all linked Git worktrees and idle branches."
         panel.prompt = "Add Scan Folder"
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
@@ -483,7 +534,7 @@ final class AppViewModel {
         }
     }
 
-    // MARK: - Manual Scanning
+    // MARK: - Full Repository + Branch Hygiene Scan
 
     func startScan() {
         currentScanTask?.cancel()
@@ -494,11 +545,11 @@ final class AppViewModel {
 
         guard !configuration.enabledFolderPaths.isEmpty else {
             projects = []
+            snapshotsByProjectID = [:]
+            changedFilesByWorktreeID = [:]
             scanSummary = ScanSummary()
-            selectedProjectID = nil
-            selectedWorktreeID = nil
-            historySnapshot = nil
             isScanning = false
+            isLoadingSnapshots = false
             statusMessage = "Add a folder to begin scanning"
             return
         }
@@ -525,15 +576,8 @@ final class AppViewModel {
                     return
                 }
                 self.appliedPartialSeq = seq
-                let ordered = self.sortProjects(partial, by: self.sortOrder)
-                self.projects = ordered
-                self.scanSummary = ScanSummary(projects: ordered)
-                if !hadProjects {
-                    for p in ordered where !p.subWorktrees.isEmpty {
-                        self.expandedProjectIDs.insert(p.id)
-                    }
-                }
-                self.ensureValidSelection(forceRefresh: false)
+                self.projects = self.sortProjectsForDashboard(partial, snapshots: self.snapshotsByProjectID)
+                self.scanSummary = ScanSummary(projects: self.projects)
             }
         }
 
@@ -546,21 +590,26 @@ final class AppViewModel {
             )
 
             guard !Task.isCancelled, let self, self.activeScanID == scanID else { return }
-            let elapsed = CFAbsoluteTimeGetCurrent() - startTime
-            let ordered = self.sortProjects(discovered, by: self.sortOrder)
 
-            withAnimation(.snappy(duration: 0.26, extraBounce: 0)) {
+            self.isLoadingSnapshots = true
+            self.statusMessage = "Inspecting branches across \(discovered.count) repo\(discovered.count == 1 ? "" : "s")…"
+
+            // Load lightweight hygiene snapshots (branches, HEAD commits, detached reachability) in parallel
+            let loadedSnapshots = await Self.loadSnapshotsInParallel(for: discovered)
+            guard !Task.isCancelled, self.activeScanID == scanID else { return }
+
+            let elapsed = CFAbsoluteTimeGetCurrent() - startTime
+            let ordered = self.sortProjectsForDashboard(discovered, snapshots: loadedSnapshots)
+
+            withAnimation(.snappy(duration: 0.24, extraBounce: 0)) {
+                self.snapshotsByProjectID = loadedSnapshots
                 self.projects = ordered
+                self.changedFilesByWorktreeID = [:]
                 self.scanSummary = ScanSummary(projects: ordered, scanDurationSeconds: elapsed)
-                if !hadProjects {
-                    for p in ordered where !p.subWorktrees.isEmpty {
-                        self.expandedProjectIDs.insert(p.id)
-                    }
-                }
             }
 
-            self.ensureValidSelection(forceRefresh: true)
             self.isScanning = false
+            self.isLoadingSnapshots = false
             self.lastScanFinishedAt = Date()
             self.statusMessage = String(
                 format: "Scanned %d repo%@ in %.2fs",
@@ -571,12 +620,60 @@ final class AppViewModel {
         }
     }
 
-    /// Automatically refreshes repository & worktree status when the Dashboard window opens or regains focus,
-    /// avoiding any background polling timer or battery usage when closed/idle.
+    private static func loadSnapshotsInParallel(for projects: [ProjectGroup]) async -> [String: ProjectHistorySnapshot] {
+        guard !projects.isEmpty else { return [:] }
+        let maxConcurrent = min(6, max(4, ProcessInfo.processInfo.activeProcessorCount - 2))
+
+        return await withTaskGroup(of: (String, ProjectHistorySnapshot)?.self, returning: [String: ProjectHistorySnapshot].self) { group in
+            var nextIndex = 0
+            let initialBatch = min(maxConcurrent, projects.count)
+
+            for _ in 0..<initialBatch {
+                let project = projects[nextIndex]
+                nextIndex += 1
+                group.addTask {
+                    if Task.isCancelled { return nil }
+                    let snap = GitHistoryService.loadSnapshot(
+                        for: project,
+                        selectedWorktree: nil,
+                        maxCommits: 0,
+                        includeWorkingTreeChanges: false
+                    )
+                    return (project.id, snap)
+                }
+            }
+
+            var results: [String: ProjectHistorySnapshot] = [:]
+            results.reserveCapacity(projects.count)
+
+            while let completed = await group.next() {
+                if nextIndex < projects.count, !Task.isCancelled {
+                    let project = projects[nextIndex]
+                    nextIndex += 1
+                    group.addTask {
+                        if Task.isCancelled { return nil }
+                        let snap = GitHistoryService.loadSnapshot(
+                            for: project,
+                            selectedWorktree: nil,
+                            maxCommits: 0,
+                            includeWorkingTreeChanges: false
+                        )
+                        return (project.id, snap)
+                    }
+                }
+                if let (id, snap) = completed {
+                    results[id] = snap
+                }
+            }
+            return results
+        }
+    }
+
+    /// Automatically refreshes repository & worktree status when the Dashboard window opens or regains focus.
     func refreshOnDashboardFocusIfNeeded() {
         checkForUpdates(manual: false)
         guard !configuration.enabledFolderPaths.isEmpty else { return }
-        guard !isScanning && !isPerformingAction else { return }
+        guard !isScanning && !isLoadingSnapshots && !isPerformingAction else { return }
         if let last = lastScanFinishedAt, Date().timeIntervalSince(last) < 2.0 {
             return
         }
@@ -647,6 +744,7 @@ final class AppViewModel {
         runScopedAction(
             label: pushAfterCommit ? "Committing & pushing \(wtName)…" : "Committing changes in \(wtName)…",
             onSuccess: { [weak self] in
+                self?.changedFilesByWorktreeID.removeValue(forKey: worktree.id)
                 await self?.refreshProjectInPlace(project)
             },
             onCleanupBusy: { [weak self] in
@@ -693,7 +791,7 @@ final class AppViewModel {
         }
     }
 
-    // MARK: - Worktree & Project Cut / Removal (Smooth In-Place Animated Removal!)
+    // MARK: - Worktree & Project Cut / Removal (Smooth In-Place Animated Removal)
 
     func pruneGhostWorktrees(in project: ProjectGroup) {
         let ghosts = project.prunableWorktrees
@@ -706,6 +804,7 @@ final class AppViewModel {
             label: "Pruning missing Git worktrees in \(project.name)…",
             onSuccess: { [weak self] in
                 self?.removeWorktreesInMemory(ids: Set(ghosts.map(\.id)), fromProjectID: project.id)
+                await self?.refreshSnapshotOnly(forProjectID: project.id)
             },
             onCleanupBusy: { [weak self] in
                 for g in ghosts {
@@ -735,7 +834,9 @@ final class AppViewModel {
         runScopedAction(
             label: "Removing worktree \(worktree.name)…",
             onSuccess: { [weak self] in
+                self?.changedFilesByWorktreeID.removeValue(forKey: worktree.id)
                 self?.removeWorktreesInMemory(ids: [worktree.id], fromProjectID: project.id)
+                await self?.refreshSnapshotOnly(forProjectID: project.id)
             },
             onCleanupBusy: { [weak self] in
                 self?.deletingWorktreeIDs.remove(worktree.id)
@@ -815,7 +916,6 @@ final class AppViewModel {
     func requestDeleteBranch(_ branch: LocalBranchInfo, in project: ProjectGroup) {
         guard branch.checkedOutWorktreeID == nil else { return }
         if let reason = branch.forceDeleteReason {
-            // Upfront detection: explain exact risk & why `git branch -D` is required before deleting!
             pendingBranchDeletion = PendingBranchDeletion(
                 project: project,
                 branch: branch,
@@ -852,9 +952,7 @@ final class AppViewModel {
 
                 deletingBranchKeys.remove(key)
                 withAnimation(.snappy(duration: 0.22, extraBounce: 0)) {
-                    if self.historySnapshot?.projectID == project.id {
-                        self.historySnapshot?.localBranches.removeAll { $0.name == branch.name }
-                    }
+                    self.snapshotsByProjectID[project.id]?.localBranches.removeAll { $0.name == branch.name }
                     self.lastReport = ActionReport(
                         title: force
                             ? "Force deleted branch '\(branch.name)'"
@@ -863,10 +961,8 @@ final class AppViewModel {
                     )
                 }
                 self.statusMessage = "Deleted branch '\(branch.name)'"
-                self.refreshInspectorSnapshot()
+                await self.refreshSnapshotOnly(forProjectID: project.id)
             } catch let GitWorktreeError.branchRequiresForceDelete(_, gitStderr) {
-                // Never dump raw `git branch -d` refusal into Operation Error!
-                // Present the structured Force-Delete risk prompt with Git's explanation instead.
                 deletingBranchKeys.remove(key)
                 let fallbackReason = branch.forceDeleteReason
                     ?? .mergedIntoBaseButGitRefusedSafeDelete(base: branch.baseRef ?? "main")
@@ -886,7 +982,7 @@ final class AppViewModel {
     }
 
     func cleanMergedBranches(in project: ProjectGroup) {
-        guard let snap = historySnapshot, snap.projectID == project.id else { return }
+        guard let snap = snapshotsByProjectID[project.id] else { return }
         let targets = snap.removableBranches
         guard !targets.isEmpty else { return }
 
@@ -972,9 +1068,7 @@ final class AppViewModel {
             let deletedSet = Set(result.0)
             if !deletedSet.isEmpty {
                 withAnimation(.snappy(duration: 0.25, extraBounce: 0)) {
-                    if self.historySnapshot?.projectID == project.id {
-                        self.historySnapshot?.localBranches.removeAll { deletedSet.contains($0.name) }
-                    }
+                    self.snapshotsByProjectID[project.id]?.localBranches.removeAll { deletedSet.contains($0.name) }
                     self.lastReport = ActionReport(
                         title: "Cleaned \(deletedSet.count) merged branch\(deletedSet.count == 1 ? "" : "es")",
                         affectedCount: deletedSet.count,
@@ -982,7 +1076,7 @@ final class AppViewModel {
                     )
                 }
                 self.statusMessage = "Cleaned \(deletedSet.count) merged branch\(deletedSet.count == 1 ? "" : "es")"
-                self.refreshInspectorSnapshot()
+                await self.refreshSnapshotOnly(forProjectID: project.id)
             } else if !result.2.isEmpty {
                 self.activeErrorMessage = result.2.joined(separator: "\n")
                 self.statusMessage = "Action failed"
@@ -998,160 +1092,70 @@ final class AppViewModel {
         }
     }
 
-    // MARK: - Smooth In-Place Animated Updates (Zero Full-List Refresh!)
+    // MARK: - Smooth In-Place Animated Updates
 
     private func removeWorktreesInMemory(ids: Set<String>, fromProjectID projectID: String) {
         withAnimation(.snappy(duration: 0.28, extraBounce: 0)) {
             if let pIdx = projects.firstIndex(where: { $0.id == projectID }) {
                 projects[pIdx].worktrees.removeAll { ids.contains($0.id) }
-                if projects[pIdx].subWorktrees.isEmpty {
-                    expandedProjectIDs.remove(projectID)
-                }
             }
             scanSummary = ScanSummary(projects: projects)
         }
-        ensureValidSelection(forceRefresh: selectedProjectID == projectID)
     }
 
     private func removeProjectInMemory(projectID: String) {
         withAnimation(.snappy(duration: 0.30, extraBounce: 0)) {
             projects.removeAll { $0.id == projectID }
-            expandedProjectIDs.remove(projectID)
+            snapshotsByProjectID.removeValue(forKey: projectID)
             scanSummary = ScanSummary(projects: projects)
         }
-        ensureValidSelection(forceRefresh: selectedProjectID == projectID)
     }
 
     private func refreshProjectInPlace(_ project: ProjectGroup) async {
         let snapshotConfig = configuration
         let refreshed = await ProjectScanner.refreshSingleProject(project, configuration: snapshotConfig)
+        let refreshedSnapshot: ProjectHistorySnapshot?
+        if let refreshed {
+            refreshedSnapshot = await Task.detached(priority: .userInitiated) {
+                GitHistoryService.loadSnapshot(
+                    for: refreshed,
+                    selectedWorktree: nil,
+                    maxCommits: 0,
+                    includeWorkingTreeChanges: false
+                )
+            }.value
+        } else {
+            refreshedSnapshot = nil
+        }
+
         withAnimation(.snappy(duration: 0.25, extraBounce: 0)) {
             if let refreshed {
                 if let pIdx = projects.firstIndex(where: { $0.id == project.id }) {
                     projects[pIdx] = refreshed
-                    if refreshed.subWorktrees.isEmpty {
-                        expandedProjectIDs.remove(project.id)
-                    }
+                }
+                if let refreshedSnapshot {
+                    snapshotsByProjectID[project.id] = refreshedSnapshot
                 }
             } else {
                 projects.removeAll { $0.id == project.id }
-                expandedProjectIDs.remove(project.id)
+                snapshotsByProjectID.removeValue(forKey: project.id)
             }
             scanSummary = ScanSummary(projects: projects)
         }
-        ensureValidSelection(forceRefresh: selectedProjectID == project.id)
     }
 
-    // MARK: - Right Detail Selection & Git Snapshot Loading
-
-    var selectedProject: ProjectGroup? {
-        if let pid = selectedProjectID,
-           let match = projects.first(where: { $0.id == pid }) {
-            return match
-        }
-        return filteredProjects.first
-    }
-
-    var selectedWorktree: WorktreeItem? {
-        guard let project = selectedProject else { return nil }
-        if let wid = selectedWorktreeID,
-           let match = project.worktrees.first(where: { $0.id == wid }) {
-            return match
-        }
-        return project.mainWorktree ?? project.worktrees.first
-    }
-
-    var currentSelection: CheckoutSelection? {
-        get {
-            guard let proj = selectedProject else { return nil }
-            return CheckoutSelection(projectID: proj.id, worktreeID: selectedWorktree?.id)
-        }
-        set {
-            guard let sel = newValue else { return }
-            selectCheckout(projectID: sel.projectID, worktreeID: sel.worktreeID)
-        }
-    }
-
-    func selectProject(projectID: String) {
-        let proj = projects.first(where: { $0.id == projectID })
-        let mainWID = proj?.mainWorktree?.id ?? proj?.worktrees.first?.id
-        selectCheckout(projectID: projectID, worktreeID: mainWID)
-    }
-
-    func selectCheckout(projectID: String, worktreeID: String?) {
-        let proj = projects.first(where: { $0.id == projectID })
-        let resolvedWT = worktreeID ?? proj?.mainWorktree?.id ?? proj?.worktrees.first?.id
-
-        let projectChanged = selectedProjectID != projectID
-        let changed = projectChanged || (selectedWorktreeID != resolvedWT)
-        selectedProjectID = projectID
-        selectedWorktreeID = resolvedWT
-
-        if changed || historySnapshot?.projectID != projectID || historySnapshot?.selectedWorktreeID != resolvedWT {
-            refreshInspectorSnapshot()
-        }
-    }
-
-    func ensureValidSelection(forceRefresh: Bool) {
-        let visible = filteredProjects
-        guard !visible.isEmpty else {
-            if projects.isEmpty {
-                selectedProjectID = nil
-                selectedWorktreeID = nil
-                historySnapshot = nil
-            }
-            return
-        }
-
-        let previousPID = selectedProjectID
-        let previousWID = selectedWorktreeID
-
-        if let pid = selectedProjectID,
-           let activeProj = visible.first(where: { $0.id == pid }) {
-            if let wid = selectedWorktreeID,
-               activeProj.worktrees.contains(where: { $0.id == wid }) {
-                // Current selection remains valid
-            } else {
-                selectedWorktreeID = activeProj.mainWorktree?.id ?? activeProj.worktrees.first?.id
-            }
-        } else if let first = visible.first {
-            selectedProjectID = first.id
-            selectedWorktreeID = first.mainWorktree?.id ?? first.worktrees.first?.id
-        }
-
-        let selectionChanged = (selectedProjectID != previousPID) || (selectedWorktreeID != previousWID)
-        if selectionChanged || forceRefresh || historySnapshot == nil {
-            refreshInspectorSnapshot()
-        }
-    }
-
-    func refreshInspectorSnapshot() {
-        currentHistoryTask?.cancel()
-        guard let project = selectedProject else {
-            historySnapshot = nil
-            isLoadingHistory = false
-            return
-        }
-        let worktree = selectedWorktree
-        let targetPID = project.id
-        let targetWID = worktree?.id
-
-        if historySnapshot?.projectID != targetPID {
-            isLoadingHistory = true
-        }
-
-        currentHistoryTask = Task(priority: .userInitiated) { [weak self] in
-            let snap = await Task.detached(priority: .userInitiated) {
-                GitHistoryService.loadSnapshot(for: project, selectedWorktree: worktree, maxCommits: 0)
-            }.value
-
-            guard !Task.isCancelled, let self else { return }
-            guard self.selectedProject?.id == targetPID,
-                  self.selectedWorktree?.id == targetWID else {
-                return
-            }
-            self.historySnapshot = snap
-            self.isLoadingHistory = false
+    private func refreshSnapshotOnly(forProjectID projectID: String) async {
+        guard let project = projects.first(where: { $0.id == projectID }) else { return }
+        let snap = await Task.detached(priority: .userInitiated) {
+            GitHistoryService.loadSnapshot(
+                for: project,
+                selectedWorktree: nil,
+                maxCommits: 0,
+                includeWorkingTreeChanges: false
+            )
+        }.value
+        withAnimation(.snappy(duration: 0.2, extraBounce: 0)) {
+            self.snapshotsByProjectID[projectID] = snap
         }
     }
 
@@ -1162,7 +1166,6 @@ final class AppViewModel {
         let folderURL = URL(fileURLWithPath: path)
         let editor = configuration.preferredEditor
 
-        // 1. Custom app path if `.custom`
         if editor == .custom {
             if let customPath = configuration.customEditorAppPath,
                FileManager.default.fileExists(atPath: customPath) {
@@ -1178,7 +1181,6 @@ final class AppViewModel {
             }
         }
 
-        // 2. Locate installed `.app` bundle by bundle identifier
         for bundleID in editor.bundleIdentifiers {
             if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
                 openFolder(folderURL, withApplicationAt: appURL)
@@ -1186,13 +1188,11 @@ final class AppViewModel {
             }
         }
 
-        // 3. Fallback standard `/Applications/...` paths
         for appPath in editor.fallbackAppPaths where FileManager.default.fileExists(atPath: appPath) {
             openFolder(folderURL, withApplicationAt: URL(fileURLWithPath: appPath))
             return
         }
 
-        // 4. Fallback CLI launcher (`code`, `cursor`, `zed`, etc.)
         if let cli = editor.cliCommand, ShellRunner.resolveExecutable(cli) != nil {
             _ = try? ShellRunner.run(executable: cli, arguments: [path])
             return
@@ -1233,7 +1233,6 @@ final class AppViewModel {
             return
         }
 
-        // Ultimate fallback to macOS built-in Terminal.app
         let builtInTerminal = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
         openFolder(folderURL, withApplicationAt: builtInTerminal)
     }

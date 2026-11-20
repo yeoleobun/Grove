@@ -4,7 +4,7 @@ import Foundation
 import SwiftUI
 
 guard CommandLine.arguments.count >= 2 else {
-    fputs("Usage: generate_icon.swift <output.iconset> [artwork.jpg]\n", stderr)
+    fputs("Usage: generate_icon.swift <output.iconset> [artwork.png]\n", stderr)
     exit(1)
 }
 
@@ -13,7 +13,7 @@ let scriptDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
 let rootDir = scriptDir.deletingLastPathComponent()
 let artworkPath = CommandLine.arguments.count >= 3
     ? CommandLine.arguments[2]
-    : rootDir.appendingPathComponent("Resources/AppIconArtwork.jpg").path
+    : rootDir.appendingPathComponent("Resources/AppIconArtwork.png").path
 
 guard let artworkImage = NSImage(contentsOfFile: artworkPath) else {
     fputs("Error: could not load icon artwork at \(artworkPath)\n", stderr)
@@ -25,7 +25,7 @@ try? fm.removeItem(atPath: iconsetPath)
 try fm.createDirectory(atPath: iconsetPath, withIntermediateDirectories: true)
 
 /// Authentic Apple macOS continuous squircle plate (824x824 inside 1024x1024)
-/// Prevents macOS 26 Dock from wrapping the icon in a gray system container.
+/// with a pure white light surface so macOS 26+ does not wrap the icon in a gray system box.
 struct GroveAppIcon: View {
     let image: NSImage
     let size: CGFloat
@@ -34,27 +34,43 @@ struct GroveAppIcon: View {
         let pad = size * (100.0 / 1024.0)
         let box = size - pad * 2
         let radius = box * 0.225
+        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
 
         ZStack {
+            shape
+                .fill(
+                    RadialGradient(
+                        colors: [
+                            Color.white,
+                            Color(red: 0.965, green: 0.976, blue: 0.990),
+                            Color(red: 0.918, green: 0.938, blue: 0.962)
+                        ],
+                        center: .top,
+                        startRadius: box * 0.08,
+                        endRadius: box * 0.95
+                    )
+                )
+                .frame(width: box, height: box)
+                .shadow(color: .black.opacity(0.18), radius: size * 0.024, x: 0, y: size * 0.011)
+
             Image(nsImage: image)
                 .resizable()
                 .interpolation(.high)
                 .antialiased(true)
-                .scaledToFill()
-                .frame(width: box, height: box)
-                .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
-                .shadow(color: .black.opacity(0.20), radius: size * 0.024, x: 0, y: size * 0.011)
-                .overlay(
-                    RoundedRectangle(cornerRadius: radius, style: .continuous)
-                        .strokeBorder(
-                            LinearGradient(
-                                colors: [Color.white.opacity(0.75), Color.black.opacity(0.08)],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            ),
-                            lineWidth: max(0.5, size * 0.0025)
-                        )
+                .scaledToFit()
+                .frame(width: box * 0.84, height: box * 0.84)
+                .shadow(color: Color(red: 0.15, green: 0.25, blue: 0.35).opacity(0.14), radius: size * 0.018, x: 0, y: size * 0.014)
+
+            shape
+                .strokeBorder(
+                    LinearGradient(
+                        colors: [Color.white.opacity(0.9), Color.black.opacity(0.08)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    ),
+                    lineWidth: max(0.5, size * 0.0025)
                 )
+                .frame(width: box, height: box)
         }
         .frame(width: size, height: size)
     }
